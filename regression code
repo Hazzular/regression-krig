@@ -1,0 +1,83 @@
+#r-exercises 
+#add soil points
+soil <- read.delim2("element.txt",sep= '\t')
+soil$Y <- as.numeric(as.character(soil$Y))
+soil$X <- as.numeric(as.character(soil$X))
+coordinates(soil)=~X+Y
+crs(soil) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+#adding raster
+fl <- list.files("./exercise", pattern = ".tif$", full.names = TRUE)
+rst<- stack(fl)
+crs(rst) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+names(rst)<- c("Aspect", "Elevation", "Slope")
+plot(rst)
+#corr
+
+
+#generate the kfold train data 10-fold
+kfoldSplit <- function(x, k=10, train=TRUE){
+  x <- sample(x, size = length(x), replace = FALSE)
+  out <- suppressWarnings(split(x, factor(1:k)))
+  if(train) out <- lapply(out, FUN = function(x, len) (1:len)[-x], len=length(unlist(out)))
+  return(out)
+}
+# Regression residuals from RF object
+resid.RF <- function(x) return(x$y - x$predicted)
+#creating store of rmse values
+set.seed(12345)
+
+k <- 10
+
+kfolds <- kfoldSplit(1:nrow(soil), k = 10, train = TRUE)
+
+evalData <- matrix(NA, nrow=k, ncol=7, 
+                   dimnames = list(1:k, c("OK","RF","GLM","GAM","RF_OK","GLM_OK","GAM_OK")))
+
+#modelling
+library(raster)
+library(randomForest)
+library(mgcv)
+library(gstat)
+
+#loop for what the results will print the data divided in 10 fold
+for(i in 1:k){
+  
+  cat("K-fold...",i,"of",k,"....\n")
+# TRAIN indices as integer
+idx <- kfolds[[i]]
+# TRAIN indices as a boolean vector
+idxBool <- (1:nrow(soil)) %in% idx
+  
+#Observed test data for the target variable
+obs.test1 <- soil[!idxBool, "Na"]}
+obs.test <- obs.test1$Na
+
+
+#ordinary kriging
+#making a variogram 
+formMod <- Na~1
+mod <- vgm(model  = "Exp", psill  = 3, range  = 100, nugget = 0.5)
+variog <- variogram(formMod, soil[idxBool, ])
+# Variogram fitting by Ordinary Least Sqaure
+variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+plot(variog, variogFitOLS, main="OLS Model")
+
+#kriging predicitons 
+OK <- krige(formula = formMod ,
+            locations = soil[idxBool, ], 
+            model = variogFitOLS,
+            newdata = soil[!idxBool, ],
+            debug.level = 0)
+#WORKING OUT THE RMSE VALUE
+ok.pred.test <- OK@data$var1.pred
+evalData[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+
+
+#rf 
+RF <- randomForest(y=soil[idx, "Na"],
+                   x= soil[idx, c("slope", "Elevation", "Apspect")],
+                   ntree=500,
+                   mtry=2)
+
+
