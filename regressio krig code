@@ -1,18 +1,23 @@
 #r-exercises 
-#add soil data 
-soil <- read.delim2("https://raw.github.com/Hazzular/regression-krig/master/element.txt",sep= '\t' )
+if(!dir.exists("./data-raw")) dir.create("./data-raw")
+download.file("https://github.com/Hazzular/regression-krig.git", "./data-raw/regression-krig.git", method = "auto")
+#add soil points
+soil <- read.delim2("element.txt",sep= '\t')
 soil$Y <- as.numeric(as.character(soil$Y))
 soil$X <- as.numeric(as.character(soil$X))
 coordinates(soil)=~X+Y
 crs(soil) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
-
+#formatdata
+soil$slope <- as.numeric(as.factor(soil$slope))
+soil$Apspect <- as.numeric(as.factor(soil$Apspect))
+soil$Elevation.1 <- as.numeric(as.integer(soil$Elevation.1))
 #adding raster
 fl <- list.files("./exercise", pattern = ".tif$", full.names = TRUE)
 rst<- stack(fl)
 crs(rst) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
-names(rst)<- c("Aspect", "Elevation", "Slope")
+names(rst)<- c("Apspect", "Elevation.1", "slope")
 plot(rst)
-
+#corr
 
 
 #generate the kfold train data 10-fold
@@ -33,7 +38,8 @@ kfolds <- kfoldSplit(1:nrow(soil), k = 10, train = TRUE)
 
 evalData <- matrix(NA, nrow=k, ncol=7, 
                    dimnames = list(1:k, c("OK","RF","GLM","GAM","RF_OK","GLM_OK","GAM_OK")))
-
+#adding mean error matrix
+Medata<- matrix(NA, nrow=k, ncol=7, dimnames = list(1:k, c("OK","RF","GLM","GAM","RF_OK","GLM_OK","GAM_OK"))))
 #modelling
 library(raster)
 library(randomForest)
@@ -50,7 +56,7 @@ idx <- kfolds[[i]]
 idxBool <- (1:nrow(soil)) %in% idx
   
 #Observed test data for the target variable
-obs.test1 <- soil[!idxBool, "Na"]}
+obs.test1 <- soil[!idxBool, "Na"]
 obs.test <- obs.test1$Na
 
 
@@ -72,11 +78,82 @@ OK <- krige(formula = formMod ,
 #WORKING OUT THE RMSE VALUE
 ok.pred.test <- OK@data$var1.pred
 evalData[i,"OK"] <- sqrt(mean((ok.pred.test - obs.test)^2))
+Medata[i,"OK"] <- mean(ok.pred.test-obs.test)
 
 
 
 #rf 
-RF <- randomForest(y=soil[idx, "Na"],
-                   x= soil[idx, c("slope", "Elevation", "Apspect")],
-                   ntree=500,
-                   mtry=2)
+RF <- randomForest(y = soil@data[idx, "Na"],
+                   x = soil@data[idx, c("slope", "Elevation", "Apspect")],
+                   ntree = 500,
+                   mtry = 2)
+
+rf.pred.test <- predict(RF, newdata = soil@data[-idx,], type="response")
+evalData[i,"RF"] <- sqrt(mean((rf.pred.test - obs.test)^2))
+
+#OK of RF residuals
+statPointsTMP <- soil[idxBool, ]
+statPointsTMP@data <- cbind(statPointsTMP@data, residRF = resid.RF(RF))
+formMod <- statPointsTMP$residRF ~ 1
+mod <- vgm(model  = "Exp", psill  = 0.6, range  = 10, nugget = 0.01)
+variog <- variogram(formMod, statPointsTMP)
+
+# Variogram fitting by Ordinary Least Sqaure
+variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+plot(variog, variogFitOLS, main="OLS Model")
+
+#kriging predictions
+RF.OK <- krige(formula = formMod ,
+               locations = statPointsTMP, 
+               model = variogFitOLS,
+               newdata = soil[!idxBool, ],
+               debug.level = 0)
+
+rf.ok.pred.test <- rf.pred.test + RF.OK@data$var1.pred
+evalData[i,"RF_OK"] <- sqrt(mean((rf.ok.pred.test - obs.test)^2))
+
+#GLM
+GLM <- glm(formula = Na ~ Elevation.1 + Apspect + slope, data = soil@data[idx, ])
+glm.pred.test <- predict(GLM, newdata = soil@data[-idx,], type="response")
+evalData[i,"GLM"] <- sqrt(mean((glm.pred.test - obs.test)^2))
+#OK of GLM residuals
+statPointsTMP <- soil[idxBool, ]
+statPointsTMP@data <- cbind(statPointsTMP@data, residGLM = resid(GLM))
+formMod <- residGLM ~ 1
+mod <- vgm(model  = "Exp", psill  = 0.4, range  = 10, nugget = 0.01)
+variog <- variogram(formMod, statPointsTMP)
+variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+plot(variog, variogFitOLS, main="OLS Model")
+GLM.OK <- krige(formula = formMod ,
+                locations = statPointsTMP, 
+                model = variogFitOLS,
+                newdata = soil[!idxBool, ],
+                debug.level = 0)
+glm.ok.pred.test <- glm.pred.test + GLM.OK@data$var1.pred
+evalData[i,"GLM_OK"] <- sqrt(mean((glm.ok.pred.test - obs.test)^2))
+
+#GAM
+GAM <- gam(formula = Na ~ s(Elevation.1) + s(Apspect) + s(slope), data = soil@data[idx, ])
+gam.pred.test <- predict(GAM, newdata = soil@data[-idx,], type="response")
+evalData[i,"GAM"] <- sqrt(mean((gam.pred.test - obs.test)^2))
+
+# Ordinary Kriging of GAM residuals
+
+statPointsTMP <- soil[idxBool, ]
+statPointsTMP@data <- cbind(statPointsTMP@data, residGAM = resid(GAM))
+formMod <- residGAM ~ 1
+mod <- vgm(model  = "Exp", psill  = 0.3, range  = 10, nugget = 0.01)
+variog <- variogram(formMod, statPointsTMP)
+variogFitOLS<-fit.variogram(variog, model = mod,  fit.method = 6)
+plot(variog, variogFitOLS, main="OLS Model")
+# kriging predictions
+GAM.OK <- krige(formula = formMod ,
+                locations = statPointsTMP, 
+                model = variogFitOLS,
+                newdata = soil[!idxBool, ],
+                debug.level = 0)
+
+gam.ok.pred.test <- gam.pred.test + GAM.OK@data$var1.pred
+evalData[i,"GAM_OK"] <- sqrt(mean((gam.ok.pred.test - obs.test)^2))
+}
+round(apply(evalData,2,FUN = function(x,...) c(mean(x,...),sd(x,...))),3)
